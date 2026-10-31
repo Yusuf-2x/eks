@@ -7,6 +7,7 @@
 # -----------------------------------------------------------------------------
 
 data "aws_availability_zones" "available" {
+  #checkov:skip=CKV_AWS_394:Only the first az_count zones (sorted, e.g. a and b) are used, so a new AZ never changes the subnets
   state = "available"
 }
 
@@ -126,7 +127,10 @@ resource "aws_route_table_association" "private" {
 }
 
 # ---------------- VPC Flow Logs (network audit trail) ----------------
+#trivy:ignore:AWS-0017
 resource "aws_cloudwatch_log_group" "flow_logs" {
+  #checkov:skip=CKV_AWS_158:CloudWatch default encryption is enough for flow logs here
+  #checkov:skip=CKV_AWS_338:7-day retention on purpose (cost)
   count             = var.enable_flow_logs ? 1 : 0
   name              = "/aws/vpc/${var.name}/flow-logs"
   retention_in_days = 7

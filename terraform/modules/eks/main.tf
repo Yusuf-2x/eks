@@ -1,13 +1,27 @@
 # -----------------------------------------------------------------------------
-# EKS MODULE
+# EKS MODULE (Auto Mode)
 #  - Control plane (managed by AWS) with secrets encryption + audit logging
-#  - Managed node group in PRIVATE subnets, launched from a hardened template
-#  - Security groups that only allow the traffic EKS actually needs
-#  - Core add-ons (VPC CNI, CoreDNS, kube-proxy, Pod Identity agent so pods
-#    can get their own scoped IAM roles in later tasks)
+#  - EKS Auto Mode: AWS launches, patches and scales the nodes (Karpenter under
+#    the hood) and runs the core add-ons for us: VPC CNI, CoreDNS, kube-proxy,
+#    EBS CSI driver, AWS Load Balancer Controller and the Pod Identity agent.
+#    No node group, launch template or add-on resources to maintain.
+#  - Auto Mode nodes are hardened by AWS: Bottlerocket OS, read-only root
+#    filesystem, IMDSv2 only, encrypted volumes, no SSH/SSM, and replaced at
+#    least every 21 days so they stay patched.
+#  - Access entries (not the old aws-auth ConfigMap) decide who is admin.
 # -----------------------------------------------------------------------------
 
 data "aws_caller_identity" "current" {}
+
+# Turns "assumed-role/<role>/<session>" into the role ARN, so the person or CI
+# role running Terraform can be made a cluster admin.
+data "aws_iam_session_context" "current" {
+  arn = data.aws_caller_identity.current.arn
+}
+
+locals {
+  admin_principal_arns = toset(concat([data.aws_iam_session_context.current.issuer_arn], var.cluster_admin_arns))
+}
 
 # ---------------- Encryption for Kubernetes Secrets ----------------
 resource "aws_kms_key" "eks" {
@@ -32,107 +46,77 @@ resource "aws_kms_alias" "eks" {
   target_key_id = aws_kms_key.eks.key_id
 }
 
+# The cluster role may use this one key (and nothing else) for envelope encryption.
+resource "aws_iam_role_policy" "cluster_encryption" {
+  name = "${var.cluster_name}-secrets-encryption"
+  role = var.cluster_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["kms:Encrypt", "kms:Decrypt", "kms:ListGrants", "kms:DescribeKey"]
+      Resource = aws_kms_key.eks.arn
+    }]
+  })
+}
+
 # ---------------- Control plane logs ----------------
 # Must exist before the cluster, otherwise EKS creates it with no retention.
+# CloudWatch already encrypts logs at rest with an AWS key; a customer-managed
+# key would only add key-policy control. Short retention keeps cost down while learning.
+#trivy:ignore:AWS-0017
 resource "aws_cloudwatch_log_group" "cluster" {
+  #checkov:skip=CKV_AWS_158:CloudWatch default encryption is enough for a learning cluster
+  #checkov:skip=CKV_AWS_338:7-day retention on purpose (cost); raise log_retention_days for production
   name              = "/aws/eks/${var.cluster_name}/cluster"
   retention_in_days = var.log_retention_days
 }
 
-# ---------------- Security groups ----------------
-# EKS also creates its own "cluster security group" automatically. It is
-# attached to both the control plane and the nodes and allows all traffic
-# between them. The two groups below add tighter, explicit rules on top.
-#
-# GOTCHA: do NOT tag the node SG with kubernetes.io/cluster/<name>=owned.
-# The load balancer controller looks for exactly ONE SG with that tag per
-# node to open NodePorts on, and EKS's own cluster SG already has it.
-
-resource "aws_security_group" "cluster" {
-  name        = "${var.cluster_name}-control-plane"
-  description = "Extra rules for the EKS control plane ENIs"
-  vpc_id      = var.vpc_id
-  tags        = { Name = "${var.cluster_name}-control-plane" }
-}
-
-resource "aws_security_group" "node" {
-  name        = "${var.cluster_name}-nodes"
-  description = "EKS worker nodes"
-  vpc_id      = var.vpc_id
-  tags        = { Name = "${var.cluster_name}-nodes" }
-}
-
-# Control plane <- nodes : nodes call the Kubernetes API on 443
-resource "aws_vpc_security_group_ingress_rule" "cluster_from_nodes_https" {
-  security_group_id            = aws_security_group.cluster.id
-  referenced_security_group_id = aws_security_group.node.id
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  description                  = "Nodes to Kubernetes API"
-}
-
-# Nodes <- nodes : pod-to-pod and node-to-node traffic (DNS, app traffic, etc.)
-resource "aws_vpc_security_group_ingress_rule" "node_from_self" {
-  security_group_id            = aws_security_group.node.id
-  referenced_security_group_id = aws_security_group.node.id
-  ip_protocol                  = "-1"
-  description                  = "Node to node, all traffic"
-}
-
-# Nodes <- control plane : kubelet (logs/exec) + webhooks (cert-manager, ingress-nginx admission)
-resource "aws_vpc_security_group_ingress_rule" "node_from_cluster_kubelet" {
-  security_group_id            = aws_security_group.node.id
-  referenced_security_group_id = aws_security_group.cluster.id
-  ip_protocol                  = "tcp"
-  from_port                    = 10250
-  to_port                      = 10250
-  description                  = "Control plane to kubelet"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "node_from_cluster_webhooks" {
-  security_group_id            = aws_security_group.node.id
-  referenced_security_group_id = aws_security_group.cluster.id
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-  description                  = "Control plane to admission webhooks on 443"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "node_from_cluster_ephemeral" {
-  security_group_id            = aws_security_group.node.id
-  referenced_security_group_id = aws_security_group.cluster.id
-  ip_protocol                  = "tcp"
-  from_port                    = 1025
-  to_port                      = 65535
-  description                  = "Control plane to webhooks/metrics on high ports"
-}
-
-# Nodes -> anywhere : pull images, talk to AWS APIs, Let's Encrypt, Route 53...
-# (Leaves via the NAT gateway; nothing can come IN this way.)
-resource "aws_vpc_security_group_egress_rule" "node_all" {
-  security_group_id = aws_security_group.node.id
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-  description       = "Outbound internet via NAT"
-}
-
 # ---------------- Cluster ----------------
+# The public API endpoint stays on so kubectl works without a VPN, but only the
+# CIDRs in api_allowed_cidrs can reach it (0.0.0.0/0 is rejected by the root stack).
+#trivy:ignore:AWS-0040
+#trivy:ignore:AWS-0041
 resource "aws_eks_cluster" "this" {
+  #checkov:skip=CKV_AWS_39:Public endpoint is limited to api_allowed_cidrs; private endpoint is on for nodes
+  #checkov:skip=CKV_AWS_339:Checkov's version list lags EKS releases; cluster_version is checked against describe-cluster-versions
   name     = var.cluster_name
   version  = var.cluster_version
   role_arn = var.cluster_role_arn
 
-  # Access entries (API) instead of the old aws-auth ConfigMap.
-  # Whoever runs `terraform apply` becomes cluster admin.
+  # Auto Mode manages the core add-ons itself; don't install the self-managed copies.
+  bootstrap_self_managed_addons = false
+
   access_config {
-    authentication_mode                         = "API"
-    bootstrap_cluster_creator_admin_permissions = true
+    authentication_mode = "API"
+    # Admins are granted explicitly below, so they're visible in Terraform.
+    bootstrap_cluster_creator_admin_permissions = false
   }
 
+  # ---- Auto Mode: these three blocks must be enabled together ----
+  compute_config {
+    enabled = true
+    # general-purpose = your workloads; system = critical add-ons (tainted CriticalAddonsOnly)
+    node_pools    = var.node_pools
+    node_role_arn = var.node_role_arn
+  }
+
+  kubernetes_network_config {
+    elastic_load_balancing {
+      enabled = true
+    }
+  }
+
+  storage_config {
+    block_storage {
+      enabled = true
+    }
+  }
+
+  # Auto Mode launches nodes into these same (private) subnets.
   vpc_config {
     subnet_ids              = var.private_subnet_ids
-    security_group_ids      = [aws_security_group.cluster.id]
     endpoint_private_access = true # nodes talk to the API inside the VPC
     endpoint_public_access  = true # so you (and CI) can run kubectl
     public_access_cidrs     = var.api_allowed_cidrs
@@ -152,87 +136,35 @@ resource "aws_eks_cluster" "this" {
     support_type = "STANDARD"
   }
 
-  depends_on = [aws_cloudwatch_log_group.cluster]
-}
-
-# ---------------- Worker nodes ----------------
-resource "aws_launch_template" "node" {
-  name_prefix = "${var.cluster_name}-node-"
-
-  # Attach EKS's cluster SG (control plane <-> node, LB NodePorts) + our node SG.
-  vpc_security_group_ids = [
-    aws_eks_cluster.this.vpc_config[0].cluster_security_group_id,
-    aws_security_group.node.id,
+  depends_on = [
+    aws_cloudwatch_log_group.cluster,
+    aws_iam_role_policy.cluster_encryption,
   ]
-
-  # IMDSv2 only: blocks a whole class of SSRF credential-theft attacks.
-  metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 2
-  }
-
-  block_device_mappings {
-    device_name = "/dev/xvda"
-    ebs {
-      volume_size           = var.node_disk_size
-      volume_type           = "gp3"
-      encrypted             = true
-      delete_on_termination = true
-    }
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-    tags          = { Name = "${var.cluster_name}-node" }
-  }
 }
 
-resource "aws_eks_node_group" "this" {
-  cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "${var.cluster_name}-default"
-  node_role_arn   = var.node_role_arn
-  subnet_ids      = var.private_subnet_ids
+# ---------------- Cluster admins ----------------
+resource "aws_eks_access_entry" "admin" {
+  for_each = local.admin_principal_arns
 
-  ami_type       = "AL2023_x86_64_STANDARD"
-  capacity_type  = var.node_capacity_type
-  instance_types = var.node_instance_types
-
-  launch_template {
-    id      = aws_launch_template.node.id
-    version = aws_launch_template.node.latest_version
-  }
-
-  scaling_config {
-    min_size     = var.node_min_size
-    desired_size = var.node_desired_size
-    max_size     = var.node_max_size
-  }
-
-  update_config {
-    max_unavailable = 1
-  }
-
-  lifecycle {
-    # Let an autoscaler change the size without Terraform fighting it.
-    ignore_changes = [scaling_config[0].desired_size]
-  }
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  type          = "STANDARD"
 }
 
-# ---------------- Add-ons ----------------
-resource "aws_eks_addon" "this" {
-  for_each = toset(["vpc-cni", "kube-proxy", "coredns", "eks-pod-identity-agent"])
+resource "aws_eks_access_policy_association" "admin" {
+  for_each = local.admin_principal_arns
 
-  cluster_name                = aws_eks_cluster.this.name
-  addon_name                  = each.value
-  resolve_conflicts_on_create = "OVERWRITE"
-  resolve_conflicts_on_update = "OVERWRITE"
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
-  # CoreDNS needs nodes to schedule onto.
-  depends_on = [aws_eks_node_group.this]
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.admin]
 }
 
-# No IAM OIDC provider (IRSA) here: this AWS account's Organization policy
-# denies iam:*OpenIDConnectProvider*. Pods that need AWS permissions
-# (cert-manager, ExternalDNS) use EKS Pod Identity instead, via the
-# eks-pod-identity-agent add-on above + aws_eks_pod_identity_association.
+# No IAM OIDC provider (IRSA) here: pods that need AWS permissions
+# (cert-manager, ExternalDNS) use EKS Pod Identity, which Auto Mode runs on
+# every node. Grant them roles with aws_eks_pod_identity_association.

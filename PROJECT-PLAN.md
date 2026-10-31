@@ -42,7 +42,7 @@ aws sts get-caller-identity   # should print your account ID
 - The account is not in an AWS Organization, so there are no region locks and **IAM OIDC providers are allowed**:
   - pods still get AWS permissions via **EKS Pod Identity** (the modern way, no OIDC needed)
   - GitHub Actions (Task 5) can use **GitHub OIDC** (no long-lived keys)
-- EC2 limit: 64 vCPUs (plenty for 2 × t3.medium).
+- EC2 limit: 64 vCPUs (plenty for the few nodes Auto Mode will launch).
 - *(Before 2026-10-31 the project used `yusuf-admin` in `166390307172`, which was locked to eu-north-1. Not used any more.)*
 
 ### 💸 Cost warning — read this
@@ -51,10 +51,11 @@ EKS is **not** free tier. Rough running cost in eu-west-2 (London):
 | Item | ~ per hour | ~ per month if left on |
 |---|---|---|
 | EKS control plane | $0.10 | $73 |
-| 2 × t3.medium nodes | $0.09 | $65 |
+| Auto Mode nodes: only while pods need them. AWS picks the size; price includes the ~12% Auto Mode fee | ~$0.10 per node | $0 with no pods, ~$70+ per node |
 | 1 × NAT gateway | $0.05 + data | $35+ |
 | Network Load Balancer (Task 2+) | $0.025 | $18 |
-| **Total** | **~$0.27/hr** | **~$190/month** |
+| KMS key for Secrets | — | $1 |
+| **Total** (empty cluster → cluster with apps on 2 nodes) | **~$0.15 → ~$0.40/hr** | **~$110 → ~$290/month** |
 
 👉 Work in sessions: `terraform apply` when you start, `terraform destroy` when you stop.
 A day of work ≈ $2–3. **Set an AWS Budget alert** (Billing → Budgets → $20) before you deploy anything.
@@ -67,14 +68,15 @@ A day of work ≈ $2–3. **Set an AWS Budget alert** (Billing → Budgets → $
 eks-project/
 ├── app/                    # 2048 game + hardened Dockerfile/nginx.conf     ✅ container
 ├── terraform/
-│   ├── bootstrap/          # S3 + DynamoDB for remote state (run once)   ✅ Task 1 (applied)
-│   ├── ecr/                # ECR repo for the app image (long-lived)      ✅ applied
+│   ├── ecr/                # stack: ECR repo for the app image (long-lived) ✅ applied
 │   ├── modules/
 │   │   ├── vpc/            # VPC, subnets, NAT, flow logs                ✅ Task 1
-│   │   ├── iam/            # cluster + node IAM roles                    ✅ Task 1
-│   │   ├── eks/            # cluster, node group, SGs, add-ons            ✅ Task 1
+│   │   ├── iam/            # cluster + node IAM roles (Auto Mode)        ✅ Task 1
+│   │   ├── eks/            # Auto Mode cluster, KMS, logs, admin access   ✅ Task 1
+│   │   ├── ecr/            # hardened ECR repository                      ✅
 │   │   └── pod-identity/   # IAM roles for cert-manager/ExternalDNS      ⏳ Task 3/4
-│   └── main.tf ...         # root stack wiring modules together          ✅ Task 1
+│   └── main.tf ...         # stack: cluster (vpc + iam + eks modules)     ✅ Task 1 (not applied)
+│   (state bucket: created by hand, see docs/REMOTE-STATE.md)             ✅
 ├── k8s/                    # Kubernetes manifests or Helm chart for the app ⏳
 ├── argocd/                 # ArgoCD Applications (app-of-apps)            ⏳
 ├── .github/workflows/      # CI/CD pipelines                              ⏳
@@ -88,14 +90,14 @@ eks-project/
 > Do them in this order — each one builds on the previous.
 
 ### ✅ Task 1 — AWS infrastructure with Terraform  *(done — see `docs/TASK-1-GUIDE.md`)*
-- Remote state: S3 bucket (versioned, encrypted, private) + DynamoDB lock table
+- Remote state: S3 bucket created by hand (versioned, encrypted, private, HTTPS-only), S3 native locking (`use_lockfile`). See `docs/REMOTE-STATE.md`.
 - VPC across 2 AZs: public subnets (load balancer, NAT) + private subnets (nodes)
-- IAM: cluster role + node role (least privilege, AWS managed policies)
-- EKS: encrypted secrets (KMS), control-plane logs, private nodes, IMDSv2, encrypted disks, tight security groups, Pod Identity agent
-- **Done when:** `kubectl get nodes` shows 2 `Ready` nodes.
+- IAM: cluster role (Auto Mode policies) + minimal node role (join cluster + pull from ECR)
+- EKS **Auto Mode**: AWS runs the nodes (Bottlerocket, IMDSv2, encrypted, auto-patched) and the core add-ons (CNI, CoreDNS, EBS CSI, load balancer controller, Pod Identity). Encrypted secrets (KMS), all control-plane logs, API limited to your IP, explicit admin access entries.
+- **Done when:** `kubectl get nodepools` shows `general-purpose` + `system`, and a test pod makes a node appear (see the guide).
 
 ### ⏳ Task 2 — NGINX Ingress Controller
-- `helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace` with values that ask for an **NLB** (`service.beta.kubernetes.io/aws-load-balancer-type: nlb`).
+- `helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace` with values that ask Auto Mode's built-in load balancer controller for an **NLB**: `controller.service.loadBalancerClass=eks.amazonaws.com/nlb` plus the annotation `service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing` (Auto Mode's default is *internal*).
 - This creates an AWS load balancer in your **public** subnets (that's what the `kubernetes.io/role/elb` subnet tags are for).
 - Deploy the app (Deployment + Service + Ingress with `ingressClassName: nginx`).
 - **Done when:** the NLB's DNS name in a browser shows the game over HTTP.
@@ -128,7 +130,7 @@ Auth: the current account allows OIDC, so use **GitHub OIDC** (an IAM role GitHu
 - Helm install `kube-prometheus-stack` (Prometheus, Grafana, node-exporter, kube-state-metrics in one chart).
 - Enable ingress-nginx metrics (`controller.metrics.enabled=true`, `serviceMonitor.enabled=true`).
 - Grafana at `grafana.<domain>`. Dashboards: CPU/memory by node & pod, pod restarts/health, node status, ingress request rate/latency/5xx (Grafana dashboard ID 9614 / the official ingress-nginx dashboard).
-- Need gp3 storage: install the **EBS CSI driver** add-on (needs IAM role) if you want persistent Prometheus data.
+- Persistent Prometheus data: Auto Mode already includes EBS storage. Just create a `StorageClass` with `provisioner: ebs.csi.eks.amazonaws.com` (gp3, encrypted).
 
 ### ⏳ Task 8 — Architecture diagram
 - Mermaid in `docs/architecture.md` (renders on GitHub) or draw.io.
@@ -144,11 +146,11 @@ Auth: the current account allows OIDC, so use **GitHub OIDC** (an IAM role GitHu
 | **Public vs private subnet** | Public = has a route to the Internet Gateway (things here can be reached from the internet). Private = no inbound route from the internet; outbound goes via NAT. Nodes live in private, the load balancer lives in public. |
 | **NAT gateway** | Lets private nodes download images/updates without being reachable from outside. |
 | **EKS control plane** | The Kubernetes "brain" (API server, etcd). AWS runs it; you pay $0.10/hr. |
-| **Managed node group** | EC2 instances that run your pods. AWS handles joining/updating them. |
+| **EKS Auto Mode** | AWS launches/patches/removes the EC2 nodes that run your pods, and runs the core add-ons. You never manage a node group. |
 | **Security group** | Stateful firewall on each network interface. |
 | **IAM role** | A set of AWS permissions something can "assume" (EKS, EC2 nodes, a pod, GitHub Actions). |
-| **Pod Identity** | How one specific pod gets its own IAM role (e.g. only ExternalDNS can edit Route 53). (IRSA/OIDC is the older way — blocked in this AWS account.) |
-| **Remote state + lock** | Terraform's memory of what it created, stored safely in S3; DynamoDB stops two runs clashing. |
+| **Pod Identity** | How one specific pod gets its own IAM role (e.g. only ExternalDNS can edit Route 53). (IRSA/OIDC is the older way.) |
+| **Remote state + lock** | Terraform's memory of what it created, stored safely in S3; a `.tflock` file in the bucket stops two runs clashing. |
 | **Ingress controller** | A reverse proxy (NGINX) inside the cluster that routes `eks.<domain>` → your app's Service. |
 | **GitOps** | Git is the source of truth; ArgoCD continuously makes the cluster match Git. |
 
@@ -156,11 +158,12 @@ Auth: the current account allows OIDC, so use **GitHub OIDC** (an IAM role GitHu
 
 ## 4. Progress tracker
 
-- [x] Task 1 code written + `terraform validate` passes
-- [ ] Task 1 deployed to AWS (`kubectl get nodes` → 2 Ready)
+- [x] Task 1 code written for EKS Auto Mode, 4 modules; validate + plan (39 to add) pass; Checkov 0 failed, Trivy 0
+- [x] Remote state: S3 bucket made by hand, S3 native locking, DynamoDB removed (`docs/REMOTE-STATE.md`)
+- [ ] Task 1 deployed to AWS (`kubectl get nodepools` + test pod gets a node)
 - [ ] Task 1 pushed to your GitHub repo
 - [x] App containerised + hardened (`docs/CONTAINER-GUIDE.md`) — Trivy/Checkov clean
-- [x] State bucket (bootstrap) + ECR repo `eks-2048` created in eu-west-2; image `ec0b220` pushed, ECR scan 0 findings
+- [x] ECR repo `eks-2048` created in eu-west-2 (now via `modules/ecr`); image `ec0b220` pushed, ECR scan 0 findings
 - [ ] Task 2 — ingress-nginx + app over HTTP
 - [ ] Task 3 — cert-manager, HTTPS
 - [ ] Task 4 — ExternalDNS, `https://eks.<domain>` live

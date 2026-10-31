@@ -1,6 +1,6 @@
-# Copy to backend.hcl and fill in with the outputs from terraform/bootstrap.
+# Copy to backend.hcl and put your account ID in the bucket name (bucket is created by hand: docs/REMOTE-STATE.md).
 bucket         = "eks-project-tfstate-<YOUR_ACCOUNT_ID>"
 key            = "ecr/terraform.tfstate"
 region         = "eu-west-2"
-dynamodb_table = "eks-project-tf-lock"
 encrypt        = true
+use_lockfile   = true # lock via a .tflock file in the bucket (no DynamoDB needed)

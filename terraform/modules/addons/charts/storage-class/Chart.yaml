@@ -1,0 +1,5 @@
+apiVersion: v2
+name: storage-class
+description: Default encrypted gp3 StorageClass for EKS Auto Mode's built-in EBS driver
+type: application
+version: 0.1.0

@@ -24,20 +24,34 @@ module "eks" {
   cluster_name    = local.cluster_name
   cluster_version = var.cluster_version
 
-  vpc_id             = module.vpc.vpc_id
   private_subnet_ids = module.vpc.private_subnet_ids
 
   cluster_role_arn  = module.iam.cluster_role_arn
+  cluster_role_name = module.iam.cluster_role_name
   node_role_arn     = module.iam.node_role_arn
-  api_allowed_cidrs = var.api_allowed_cidrs
+  node_pools        = var.node_pools
 
-  node_instance_types = var.node_instance_types
-  node_capacity_type  = var.node_capacity_type
-  node_min_size       = var.node_min_size
-  node_desired_size   = var.node_desired_size
-  node_max_size       = var.node_max_size
+  api_allowed_cidrs  = var.api_allowed_cidrs
+  cluster_admin_arns = var.cluster_admin_arns
 
-  # IAM policies must be attached before the cluster/nodes are created,
-  # and must stay attached until they are fully deleted.
-  depends_on = [module.iam]
+  # No module-level depends_on: it would defer the module's data sources to
+  # apply time. Ordering comes from the iam/vpc outputs instead, which wait for
+  # the policy attachments and NAT routes (see their outputs.tf).
+}
+
+module "addons" {
+  source = "./modules/addons"
+
+  # Comes from the cluster (and waits for the admin access entries, see
+  # modules/eks/outputs.tf), so every add-on is installed after it and
+  # uninstalled before it.
+  cluster_name = module.eks.cluster_name
+  region       = var.region
+  domain_name  = var.domain_name
+
+  app_name        = "eks-2048"
+  app_namespace   = "game-2048"
+  gitops_repo_url = var.gitops_repo_url
+  gitops_revision = var.gitops_revision
+  gitops_path     = "k8s"
 }

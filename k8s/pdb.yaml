@@ -1,0 +1,11 @@
+# Auto Mode replaces nodes at least every 21 days; keep one replica up while it drains them.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eks-2048
+  namespace: game-2048
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eks-2048

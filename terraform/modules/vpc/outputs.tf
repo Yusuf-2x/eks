@@ -12,6 +12,9 @@ output "public_subnet_ids" {
 
 output "private_subnet_ids" {
   value = aws_subnet.private[*].id
+  # Nodes in these subnets need their NAT route from the moment they launch
+  # until they've drained on destroy.
+  depends_on = [aws_route.private_nat, aws_route_table_association.private]
 }
 
 output "nat_public_ips" {

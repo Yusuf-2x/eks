@@ -1,0 +1,28 @@
+# One host on the shared NGINX load balancer:
+#  - ExternalDNS sees the host and creates eks.islamable.com -> NLB in Route 53
+#  - cert-manager sees the annotation and puts a Let's Encrypt cert in eks-2048-tls
+#  - NGINX redirects HTTP to HTTPS and adds HSTS (set globally in modules/addons)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: eks-2048
+  namespace: game-2048
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - eks.islamable.com
+      secretName: eks-2048-tls
+  rules:
+    - host: eks.islamable.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: eks-2048
+                port:
+                  name: http

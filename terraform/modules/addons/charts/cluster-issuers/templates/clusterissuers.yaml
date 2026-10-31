@@ -1,0 +1,25 @@
+# DNS-01: cert-manager proves domain ownership by writing a TXT record in
+# Route 53 (via its Pod Identity role), so certificates don't depend on the
+# load balancer or DNS for the host already working.
+# staging = untrusted certs but no rate limits; prod = real padlock, limited to
+# 5 identical certificates per week.
+{{- range $name, $server := dict "letsencrypt-staging" "https://acme-staging-v02.api.letsencrypt.org/directory" "letsencrypt-prod" "https://acme-v02.api.letsencrypt.org/directory" }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $name }}
+spec:
+  acme:
+    server: {{ $server }}
+    privateKeySecretRef:
+      name: {{ $name }}-account-key
+    solvers:
+      - selector:
+          dnsZones:
+            - {{ $.Values.dnsZone | quote }}
+        dns01:
+          route53:
+            region: {{ $.Values.region | quote }}
+            hostedZoneID: {{ $.Values.hostedZoneID | quote }}
+{{- end }}

@@ -2,8 +2,17 @@
 region       = "eu-west-2"
 project_name = "eks-project"
 
+# REQUIRED: who can reach the Kubernetes API (kubectl). 0.0.0.0/0 is rejected.
 # Find your IP with:  curl https://checkip.amazonaws.com
-# api_allowed_cidrs = ["203.0.113.10/32"]
+api_allowed_cidrs = ["203.0.113.10/32"]
 
-# Cheaper option while learning (nodes can be reclaimed by AWS):
-# node_capacity_type = "SPOT"
+# Other people/roles who should be cluster admins (you are added automatically):
+# cluster_admin_arns = ["arn:aws:iam::123456789012:role/github-actions-terraform"]
+
+# REQUIRED: an existing public Route 53 hosted zone. The app is served at
+# eks.<domain>; Argo CD and Grafana at argocd.<domain> / grafana.<domain>.
+domain_name = "example.com"
+
+# Repo/branch Argo CD deploys k8s/ from (defaults shown):
+# gitops_repo_url = "https://github.com/Yusuf-2x/eks.git"
+# gitops_revision = "main"
