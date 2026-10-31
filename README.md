@@ -15,14 +15,17 @@ Target URL: `https://eks.<your-domain>`
 ## Status
 - ✅ Task 1 — Terraform: VPC, IAM, EKS, remote state (code complete, validated)
 - ✅ App container — non-root, read-only, strict CSP; Trivy/Checkov clean
+- ✅ ECR — `eks-2048` repo in eu-west-2 (immutable tags, scan on push, KMS); image `ec0b220` pushed
 - ⏳ Tasks 2–8 — see the plan
 
 ## Quick start
 ```bash
 cd terraform/bootstrap && terraform init && terraform apply
-cd .. && cp backend.hcl.example backend.hcl   # fill in bucket name
+cd ../ecr && cp backend.hcl.example backend.hcl   # fill in account ID
+terraform init -backend-config=backend.hcl && terraform apply   # ECR repo (long-lived)
+cd .. && cp backend.hcl.example backend.hcl   # fill in account ID
 terraform init -backend-config=backend.hcl && terraform apply
-aws eks update-kubeconfig --region eu-north-1 --name eks-project-cluster
+aws eks update-kubeconfig --region eu-west-2 --name eks-project-cluster
 kubectl get nodes
 ```
 

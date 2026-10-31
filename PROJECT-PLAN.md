@@ -31,20 +31,22 @@ Close and reopen your terminal afterwards, then check: `terraform version`, `aws
 
 ### Connect the AWS CLI
 ```powershell
-aws configure          # access key, secret, region eu-north-1, output json
+aws configure          # access key, secret, region eu-west-2, output json
 aws sts get-caller-identity   # should print your account ID
 ```
 
-### ⚠️ AWS account notes (found 2026-10-28 — read before changing regions)
-- **Login:** IAM user `yusuf-admin` in account `166390307172` (keys saved in the `default` CLI profile, `AdministratorAccess` attached).
-- That account sits in an AWS Organization (owner `701179922972`) whose policies **block every region except `eu-north-1` (Stockholm)**. Everything in this project uses `eu-north-1`. Any other region gives "explicit deny in a service control policy".
-- The Organization also blocks **IAM OIDC providers**. So:
-  - pods get AWS permissions via **EKS Pod Identity** (not IRSA)
-  - GitHub Actions (Task 5) must use **access keys stored as GitHub secrets** (not GitHub OIDC)
-- EC2 limit: **5 vCPUs** → max 2 × t3.medium nodes. Request an increase in Service Quotas if you need more.
+### ⚠️ AWS account notes (updated 2026-10-31)
+- **Login:** IAM user `yusuf` (ADMIN group) in account `590184076390` (alias `aws-mustafa-v9` — Mustafa's account, so costs land there). Keys are in the `default` CLI profile.
+- **Region: `eu-west-2` (London)** for everything. The CLI default is also eu-west-2.
+- Mustafa's own resources live in the same region. **Don't touch them** — e.g. the ECR repo called `eks-project` (from 2024) is *not* ours; ours is `eks-2048`.
+- The account is not in an AWS Organization, so there are no region locks and **IAM OIDC providers are allowed**:
+  - pods still get AWS permissions via **EKS Pod Identity** (the modern way, no OIDC needed)
+  - GitHub Actions (Task 5) can use **GitHub OIDC** (no long-lived keys)
+- EC2 limit: 64 vCPUs (plenty for 2 × t3.medium).
+- *(Before 2026-10-31 the project used `yusuf-admin` in `166390307172`, which was locked to eu-north-1. Not used any more.)*
 
 ### 💸 Cost warning — read this
-EKS is **not** free tier. Rough running cost (eu-north-1 / Stockholm is one of the cheapest regions):
+EKS is **not** free tier. Rough running cost in eu-west-2 (London):
 
 | Item | ~ per hour | ~ per month if left on |
 |---|---|---|
@@ -65,7 +67,8 @@ A day of work ≈ $2–3. **Set an AWS Budget alert** (Billing → Budgets → $
 eks-project/
 ├── app/                    # 2048 game + hardened Dockerfile/nginx.conf     ✅ container
 ├── terraform/
-│   ├── bootstrap/          # S3 + DynamoDB for remote state (run once)   ✅ Task 1
+│   ├── bootstrap/          # S3 + DynamoDB for remote state (run once)   ✅ Task 1 (applied)
+│   ├── ecr/                # ECR repo for the app image (long-lived)      ✅ applied
 │   ├── modules/
 │   │   ├── vpc/            # VPC, subnets, NAT, flow logs                ✅ Task 1
 │   │   ├── iam/            # cluster + node IAM roles                    ✅ Task 1
@@ -110,10 +113,10 @@ eks-project/
 - **Done when:** `eks.<domain>` appears in Route 53 automatically and `https://eks.<domain>` loads with a valid padlock. 🎉 (Tasks 2–4 together = the app is "live").
 
 ### ⏳ Task 5 — CI/CD (GitHub Actions)
-Auth: GitHub OIDC is blocked in this AWS account, so create a dedicated IAM user for CI and store its keys as GitHub **encrypted secrets** (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
+Auth: the current account allows OIDC, so use **GitHub OIDC** (an IAM role GitHub assumes per run, no stored keys). Fallback: a dedicated CI IAM user with keys in GitHub **encrypted secrets**.
 - **Pipeline 1 – Terraform:** on PR → `fmt -check`, `validate`, `tflint`, `plan` (post plan as PR comment). On merge to `main` → `apply`. Manual `workflow_dispatch` for `destroy`.
 - **Pipeline 2 – App:** Checkov scan of `terraform/` → `docker build` → Trivy scan (fail on HIGH/CRITICAL) → push to **ECR** (tag = git SHA) → update image tag in `k8s/` and commit → ArgoCD deploys it.
-- Needs: `app/Dockerfile` ✅ (done — hardened, see `docs/CONTAINER-GUIDE.md`), ECR repo in Terraform.
+- Needs: `app/Dockerfile` ✅ (done — hardened, see `docs/CONTAINER-GUIDE.md`), ECR repo in Terraform ✅ (`terraform/ecr`, repo `eks-2048`).
 
 ### ⏳ Task 6 — ArgoCD (GitOps)
 - Install ArgoCD with Helm; expose UI at `argocd.<domain>` via the same Ingress/cert-manager/ExternalDNS setup.
@@ -157,6 +160,7 @@ Auth: GitHub OIDC is blocked in this AWS account, so create a dedicated IAM user
 - [ ] Task 1 deployed to AWS (`kubectl get nodes` → 2 Ready)
 - [ ] Task 1 pushed to your GitHub repo
 - [x] App containerised + hardened (`docs/CONTAINER-GUIDE.md`) — Trivy/Checkov clean
+- [x] State bucket (bootstrap) + ECR repo `eks-2048` created in eu-west-2; image `ec0b220` pushed, ECR scan 0 findings
 - [ ] Task 2 — ingress-nginx + app over HTTP
 - [ ] Task 3 — cert-manager, HTTPS
 - [ ] Task 4 — ExternalDNS, `https://eks.<domain>` live

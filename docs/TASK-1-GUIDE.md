@@ -97,7 +97,7 @@ terraform apply tfplan
 
 ### Step 4 — Connect kubectl and verify ✅
 ```powershell
-aws eks update-kubeconfig --region eu-north-1 --name eks-project-cluster
+aws eks update-kubeconfig --region eu-west-2 --name eks-project-cluster
 kubectl get nodes                 # 2 nodes, STATUS Ready
 kubectl get pods -A               # coredns, aws-node, kube-proxy, eks-pod-identity-agent Running
 ```
