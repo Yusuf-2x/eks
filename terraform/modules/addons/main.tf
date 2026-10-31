@@ -142,24 +142,16 @@ resource "helm_release" "kube_prometheus_stack" {
         podMonitorSelectorNilUsesHelmValues     = false
         ruleSelectorNilUsesHelmValues           = false
 
-        retention = "7d"
         resources = { requests = { cpu = "200m", memory = "1Gi" } }
 
-        storageSpec = {
-          volumeClaimTemplate = {
-            spec = {
-              storageClassName = "gp3"
-              accessModes      = ["ReadWriteOnce"]
-              resources        = { requests = { storage = "10Gi" } }
-            }
-          }
-        }
-        # Delete the EBS volume with the release, so `terraform destroy`
-        # doesn't leave orphaned volumes behind.
-        persistentVolumeClaimRetentionPolicy = {
-          whenDeleted = "Delete"
-          whenScaled  = "Retain"
-        }
+        # No storageSpec = data lives on the pod's node (emptyDir) and is
+        # lost if the pod moves. Deliberate: the cluster is destroyed every
+        # session anyway, and an EBS volume here outlived `terraform destroy`
+        # (the PVC cleanup lost the race with the cluster deletion) and kept
+        # billing. For a long-lived cluster, add a volumeClaimTemplate on the
+        # gp3 StorageClass back.
+        retention     = "2d"
+        retentionSize = "4GB"
       }
     }
 
