@@ -1,4 +1,3 @@
 # Set by Terraform (modules/addons/main.tf).
-region: ""
 hostedZoneID: ""
 dnsZone: ""

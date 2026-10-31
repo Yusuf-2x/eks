@@ -20,6 +20,6 @@ spec:
             - {{ $.Values.dnsZone | quote }}
         dns01:
           route53:
-            region: {{ $.Values.region | quote }}
+            # No region: Pod Identity gives cert-manager AWS_REGION already.
             hostedZoneID: {{ $.Values.hostedZoneID | quote }}
 {{- end }}

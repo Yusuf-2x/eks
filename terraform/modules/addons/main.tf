@@ -209,7 +209,6 @@ resource "helm_release" "cluster_issuers" {
   namespace = "cert-manager"
 
   values = [yamlencode({
-    region       = var.region
     hostedZoneID = data.aws_route53_zone.this.zone_id
     dnsZone      = var.domain_name
   })]
