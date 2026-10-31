@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and adjust. Everything here has a sensible default.
+region       = "eu-north-1"
+project_name = "eks-project"
+
+# Find your IP with:  curl https://checkip.amazonaws.com
+# api_allowed_cidrs = ["203.0.113.10/32"]
+
+# Cheaper option while learning (nodes can be reclaimed by AWS):
+# node_capacity_type = "SPOT"

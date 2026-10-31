@@ -1,0 +1,6 @@
+# Copy to backend.hcl and fill in with the outputs from terraform/bootstrap.
+bucket         = "eks-project-tfstate-<YOUR_ACCOUNT_ID>"
+key            = "eks/terraform.tfstate"
+region         = "eu-north-1"
+dynamodb_table = "eks-project-tf-lock"
+encrypt        = true

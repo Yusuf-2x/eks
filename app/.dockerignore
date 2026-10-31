@@ -1,0 +1,11 @@
+# Allow-list: only these files are sent to the Docker build. Anything else
+# (secrets, .git, editor files, notes) can never be copied into the image by accident.
+*
+!index.html
+!favicon.ico
+!LICENSE.txt
+!nginx.conf
+!js/
+!meta/
+!style/main.css
+!style/fonts/
